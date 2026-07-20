@@ -44,6 +44,7 @@ export type TrackedOrder = {
   id: string;
   orderNumber: number;
   status:
+    | "a_valider"
     | "en_attente"
     | "preparation"
     | "pret"
@@ -56,11 +57,28 @@ export type TrackedOrder = {
   createdAt: string;
 };
 
+export type OrderReceiptItem = {
+  name: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+  note: string | null;
+};
+
+export type OrderReceipt = TrackedOrder & {
+  tableStatus?: "libre" | "occupee" | "reservee" | null;
+  items: OrderReceiptItem[];
+};
+
 export type ScannedRestaurantTable = {
   id: string;
   label: string;
   seats: number;
   status: "libre" | "occupee" | "reservee";
+};
+
+export type TableActiveOrder = TrackedOrder & {
+  tableStatus: "libre" | "occupee" | "reservee";
 };
 
 function requireSupabase() {
@@ -140,52 +158,155 @@ export async function fetchScannedTable(
 export async function createCustomerOrder(
   input: CustomerOrderInput
 ): Promise<CreatedOrder> {
-  const { data, error } = await requireSupabase().rpc("diego_create_order", {
-    p_channel: input.channel,
-    p_items: input.items.map((item) => ({
-      product_id: item.productId,
-      quantity: item.quantity,
-      note: item.note ?? null,
-    })),
-    p_table_qr_token: input.tableQrToken ?? null,
-    p_customer_name: input.customerName ?? null,
-    p_customer_phone: input.customerPhone ?? null,
-    p_delivery_address: input.deliveryAddress ?? null,
-    p_scheduled_for: input.scheduledFor ?? null,
-    p_note: input.note ?? null,
+  const response = await fetch("/api/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      channel: input.channel,
+      tableQrToken: input.tableQrToken,
+      note: input.note,
+      items: input.items,
+    }),
   });
 
-  if (error) throw error;
-  const row = Array.isArray(data) ? data[0] : data;
-  if (!row) throw new Error("Supabase did not return the created order.");
+  const payload = (await response.json().catch(() => null)) as {
+    id?: string;
+    orderNumber?: number;
+    trackingToken?: string;
+    total?: number;
+    error?: string;
+    debug?: { message?: string; details?: string; hint?: string; code?: string };
+  } | null;
+
+  if (!response.ok) {
+    const debugBits = payload?.debug
+      ? ` (${[payload.debug.code, payload.debug.message, payload.debug.details]
+          .filter(Boolean)
+          .join(" — ")})`
+      : "";
+    throw new Error(
+      `${payload?.error || "Impossible de créer la commande."}${debugBits}`
+    );
+  }
+
+  if (!payload?.id || payload.orderNumber == null) {
+    throw new Error("Aucune commande retournée par le serveur.");
+  }
 
   return {
-    id: row.id,
-    orderNumber: row.order_number,
-    trackingToken: row.tracking_token,
-    total: row.total,
+    id: payload.id,
+    orderNumber: payload.orderNumber,
+    trackingToken: String(payload.trackingToken ?? ""),
+    total: Number(payload.total ?? 0),
   };
 }
 
 export async function fetchMyOrder(
   orderNumber: number
 ): Promise<TrackedOrder | null> {
-  const { data, error } = await requireSupabase().rpc("diego_track_order", {
-    p_order_number: orderNumber,
-  });
+  const receipt = await fetchOrderReceipt(orderNumber);
+  if (!receipt?.id) return null;
+  return {
+    id: receipt.id,
+    orderNumber: receipt.orderNumber,
+    status: receipt.status,
+    channel: receipt.channel,
+    total: receipt.total,
+    createdAt: receipt.createdAt,
+  };
+}
 
+function mapReceipt(data: unknown): OrderReceipt | null {
+  if (!data || typeof data !== "object") return null;
+  const row = data as Record<string, unknown>;
+  if (!row.id) {
+    return {
+      id: "",
+      orderNumber: 0,
+      status: "en_attente",
+      channel: "table",
+      total: Number(row.total ?? 0),
+      createdAt: new Date(0).toISOString(),
+      tableStatus: (row.tableStatus as OrderReceipt["tableStatus"]) ?? "libre",
+      items: [],
+    };
+  }
+
+  const rawItems = Array.isArray(row.items) ? row.items : [];
+  return {
+    id: String(row.id),
+    orderNumber: Number(row.orderNumber),
+    status: row.status as OrderReceipt["status"],
+    channel: row.channel as OrderReceipt["channel"],
+    total: Number(row.total ?? 0),
+    createdAt: String(row.createdAt),
+    tableStatus: (row.tableStatus as OrderReceipt["tableStatus"]) ?? null,
+    items: rawItems.map((item) => {
+      const line = item as Record<string, unknown>;
+      return {
+        name: String(line.name ?? ""),
+        quantity: Number(line.quantity ?? 0),
+        unitPrice: Number(line.unitPrice ?? 0),
+        lineTotal: Number(line.lineTotal ?? 0),
+        note: (line.note as string | null) ?? null,
+      };
+    }),
+  };
+}
+
+/** Détail reçu (articles + prix) par numéro de commande. */
+export async function fetchOrderReceipt(
+  orderNumber: number
+): Promise<OrderReceipt | null> {
+  const { data, error } = await requireSupabase().rpc(
+    "diego_customer_order_receipt",
+    { p_order_number: orderNumber }
+  );
   if (error) throw error;
-  const row = Array.isArray(data) ? data[0] : data;
-  if (!row) return null;
+  return mapReceipt(data);
+}
+
+/** Détail reçu lié à une table QR (tous les plats tant que non vidée). */
+export async function fetchTableOrderReceipt(
+  qrToken: string
+): Promise<OrderReceipt | null> {
+  const { data, error } = await requireSupabase().rpc(
+    "diego_customer_table_receipt",
+    { p_table_qr_token: qrToken }
+  );
+  if (error) throw error;
+  return mapReceipt(data);
+}
+
+/** Commande active liée à une table QR (null si table libre / aucune commande). */
+export async function fetchTableActiveOrder(
+  qrToken: string
+): Promise<TableActiveOrder | null> {
+  const receipt = await fetchTableOrderReceipt(qrToken);
+  if (!receipt) return null;
+
+  const tableStatus = receipt.tableStatus ?? "libre";
+  if (tableStatus === "libre" || !receipt.id) {
+    return {
+      id: "",
+      orderNumber: 0,
+      status: "en_attente",
+      channel: "table",
+      total: 0,
+      createdAt: new Date(0).toISOString(),
+      tableStatus: "libre",
+    };
+  }
 
   return {
-    id: row.id,
-    orderNumber: row.order_number,
-    status: row.status,
-    channel: row.channel,
-    total: row.total,
-    createdAt: row.created_at,
-  } as TrackedOrder;
+    id: receipt.id,
+    orderNumber: receipt.orderNumber,
+    status: receipt.status,
+    channel: receipt.channel,
+    total: receipt.total,
+    createdAt: receipt.createdAt,
+    tableStatus,
+  };
 }
 
 export function subscribeToOrder(

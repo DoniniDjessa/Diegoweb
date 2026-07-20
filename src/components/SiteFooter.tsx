@@ -44,11 +44,6 @@ export function SiteFooter() {
                 Menu & commande en ligne
               </Link>
             </li>
-            <li>
-              <Link href="/suivi" className="hover:text-brand-600">
-                Suivre ma commande
-              </Link>
-            </li>
           </ul>
         </div>
       </div>

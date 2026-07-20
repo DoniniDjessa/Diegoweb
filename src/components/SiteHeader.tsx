@@ -9,7 +9,6 @@ import { Menu, X } from "lucide-react";
 const LINKS = [
   { href: "/", label: "Accueil" },
   { href: "/menu", label: "Menu" },
-  { href: "/suivi", label: "Suivi de commande" },
 ];
 
 export function SiteHeader() {
@@ -52,7 +51,7 @@ export function SiteHeader() {
             ))}
             <Link
               href="/menu"
-              className="bg-brand-500 px-5 py-2 text-[11px] font-semibold text-ink shadow-card transition-colors hover:bg-brand-600"
+              className="border border-line bg-white px-5 py-2 text-[11px] font-semibold text-ink shadow-card transition-colors hover:border-brand-300 hover:text-brand-600"
             >
               Commander
             </Link>
@@ -89,7 +88,7 @@ export function SiteHeader() {
           <Link
             href="/menu"
             onClick={() => setOpen(false)}
-            className="mt-2 block bg-brand-500 px-5 py-2.5 text-center text-[11px] font-semibold text-ink"
+            className="mt-2 block border border-line bg-white px-5 py-2.5 text-center text-[11px] font-semibold text-ink"
           >
             Commander
           </Link>

@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import Image from "next/image";
 import Link from "next/link";
 import {
-  House,
+  ArrowLeft,
   LoaderCircle,
   Minus,
   Plus,
@@ -25,11 +25,12 @@ import {
 import { FoodImage } from "@/components/FoodImage";
 
 type CartLine = { item: MenuItem; qty: number };
+
 function MenuContent() {
   const searchParams = useSearchParams();
-  // Le QR d'une table contient son token UUID : /menu?table=<qr_token>
   const table = searchParams.get("table");
   const browseOnly = searchParams.get("mode") === "browse" || !table;
+  const backHref = table ? `/table/${encodeURIComponent(table)}` : "/";
 
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [categories, setCategories] = useState<MenuCategory[]>([]);
@@ -38,6 +39,7 @@ function MenuContent() {
   const [query, setQuery] = useState("");
   const [cart, setCart] = useState<CartLine[]>([]);
   const [cartOpen, setCartOpen] = useState(false);
+  const [orderNote, setOrderNote] = useState("");
   const [confirmed, setConfirmed] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -49,7 +51,6 @@ function MenuContent() {
         fetchMenuCategories(),
       ]);
       setMenu(products);
-      // Ne garde que les catégories qui ont au moins un produit en stock.
       const usedSlugs = new Set(products.map((item) => item.category));
       const available = nextCategories.filter((item) => usedSlugs.has(item.slug));
       setCategories(available);
@@ -76,18 +77,41 @@ function MenuContent() {
     };
   }, [loadMenu]);
 
-  const items = useMemo(
-    () => {
-      const normalizedQuery = query.trim().toLocaleLowerCase("fr");
-      return menu.filter(
-        (item) =>
-          (category === "all" || item.category === category) &&
-          (!normalizedQuery ||
-            item.name.toLocaleLowerCase("fr").includes(normalizedQuery))
-      );
-    },
-    [category, menu, query]
-  );
+  const filtered = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase("fr");
+    return menu.filter(
+      (item) =>
+        (category === "all" || item.category === category) &&
+        (!normalizedQuery ||
+          item.name.toLocaleLowerCase("fr").includes(normalizedQuery))
+    );
+  }, [category, menu, query]);
+
+  const sections = useMemo(() => {
+    const bySlug = new Map<string, MenuItem[]>();
+    for (const item of filtered) {
+      const list = bySlug.get(item.category) ?? [];
+      list.push(item);
+      bySlug.set(item.category, list);
+    }
+
+    const ordered = categories
+      .filter((c) => bySlug.has(c.slug))
+      .map((c) => ({
+        slug: c.slug,
+        label: c.label,
+        items: bySlug.get(c.slug) ?? [],
+      }));
+
+    // Produits dont la catégorie n'est plus dans la liste admin.
+    const known = new Set(categories.map((c) => c.slug));
+    const orphan = filtered.filter((item) => !known.has(item.category));
+    if (orphan.length > 0) {
+      ordered.push({ slug: "_other", label: "Autres", items: orphan });
+    }
+    return ordered;
+  }, [categories, filtered]);
+
   const total = cart.reduce((s, l) => s + l.item.price * l.qty, 0);
   const count = cart.reduce((s, l) => s + l.qty, 0);
 
@@ -121,21 +145,30 @@ function MenuContent() {
       const order = await createCustomerOrder({
         channel: "table",
         tableQrToken: table ?? undefined,
+        note: orderNote.trim() || undefined,
         items: cart.map(({ item, qty }) => ({
           productId: item.id,
           quantity: qty,
         })),
       });
       localStorage.setItem("diego-last-order", String(order.orderNumber));
+      if (table) localStorage.setItem("diego-last-table", table);
       setConfirmed(order.orderNumber);
       setCart([]);
+      setOrderNote("");
       setCartOpen(false);
     } catch (cause) {
-      setError(
+      const message =
         cause instanceof Error
           ? cause.message
-          : "Impossible de créer la commande."
-      );
+          : typeof cause === "object" &&
+              cause &&
+              "message" in cause &&
+              typeof (cause as { message: unknown }).message === "string"
+            ? (cause as { message: string }).message
+            : "Impossible de créer la commande.";
+      console.error("[checkout]", cause);
+      setError(message);
     } finally {
       setSubmitting(false);
     }
@@ -143,82 +176,74 @@ function MenuContent() {
 
   return (
     <div className="min-h-dvh bg-surface-muted">
-      <div className="mx-auto max-w-6xl px-4 py-8 sm:py-10">
-        <div className="flex flex-col items-center gap-4">
+      <div className="mx-auto max-w-6xl px-3 pb-8 pt-3 sm:px-4 sm:pb-10 sm:pt-4">
+        <div className="relative mb-4 flex items-center justify-center">
+          <Link
+            href={backHref}
+            aria-label="Retour"
+            className="absolute left-0 flex h-9 w-9 items-center justify-center rounded-full border border-line bg-white text-ink shadow-card transition hover:border-brand-300 hover:text-brand-600"
+          >
+            <ArrowLeft size={18} />
+          </Link>
           <Image
             src="/diego.png"
             alt="Chez Diego"
-            width={180}
-            height={90}
+            width={140}
+            height={70}
             priority
-            className="h-auto w-36 object-contain sm:w-44"
+            className="h-auto w-24 object-contain sm:w-28"
           />
-          <Link
-            href="/"
-            className="inline-flex items-center gap-2 border border-line bg-white px-4 py-2 text-[11px] font-semibold text-ink-soft shadow-card transition hover:border-brand-300 hover:text-brand-600 sm:px-5 sm:py-2.5"
-          >
-            <House size={15} /> Accueil
-          </Link>
-        </div>
-        <div className="mx-auto mt-6 max-w-2xl text-center">
-          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-ink-faint">
-            {browseOnly ? "Notre carte" : "Commandez en quelques touches"}
-          </p>
-          <h1 className="mt-3 font-title text-3xl font-semibold tracking-tight sm:text-5xl">
-            {browseOnly ? "Le Menu" : "Notre Menu"}
-          </h1>
-          {table && (
-            <p className="mx-auto mt-3 inline-flex items-center gap-2 border border-brand-200 bg-brand-50 px-3 py-1 text-[11px] font-bold text-brand-700 sm:px-4 sm:py-1.5 sm:text-xs">
-              <span className="h-2 w-2 rounded-full bg-brand-500" />
-              QR de table validé — service directement à votre table
-            </p>
-          )}
         </div>
 
-        {!browseOnly && (
-          <div className="mt-6 flex justify-center">
-            <span className="rounded-full border border-brand-200 bg-brand-50 px-4 py-2 text-[11px] font-semibold text-brand-700 shadow-card">
-              Commande à table
+        {table && (
+          <p className="mb-3 text-center">
+            <span className="inline-flex items-center gap-2 border border-brand-200 bg-brand-50 px-3 py-1 text-[10px] font-bold text-brand-700">
+              <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
+              Service à votre table
             </span>
-          </div>
+          </p>
         )}
 
         {error && (
-          <div className="mx-auto mt-6 max-w-2xl rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700">
+          <div className="mx-auto mb-4 max-w-2xl rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {error}
           </div>
         )}
 
         {confirmed !== null && (
-          <div className="mx-auto mt-6 flex max-w-2xl items-center justify-between rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-sm text-emerald-800">
+          <div className="mx-auto mb-4 flex max-w-2xl items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
             <span>
-              Commande <strong>#{confirmed}</strong> confirmée ! Suivez sa
-              préparation en direct.
+              Commande <strong>#{confirmed}</strong> reçue ! Elle sera
+              confirmée par le restaurant.
             </span>
             <Link
-              href={`/suivi?commande=${confirmed}`}
-              className="ml-3 shrink-0 bg-brand-500 px-5 py-2 text-[11px] font-bold text-ink hover:bg-brand-600"
+              href={
+                table
+                  ? `/suivi?table=${encodeURIComponent(table)}`
+                  : `/suivi?commande=${confirmed}`
+              }
+              className="shrink-0 bg-brand-500 px-4 py-1.5 text-[11px] font-bold text-ink hover:bg-brand-600"
             >
-              Suivre
+              Voir
             </Link>
           </div>
         )}
 
-        <div className="mt-8 border-b border-line pb-3">
-          <label className="relative block">
+        <div className="mb-4">
+          <label className="relative mx-auto block max-w-md">
             <Search
-              size={16}
+              size={14}
               className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-faint"
             />
             <input
               type="search"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Rechercher un plat"
-              className="w-full border border-line bg-white py-2.5 pl-10 pr-4 text-sm outline-none transition focus:border-brand-400"
+              placeholder="Rechercher…"
+              className="h-9 w-full rounded-full border border-line bg-white pl-9 pr-4 text-xs outline-none transition focus:border-brand-400 focus:ring-2 focus:ring-brand-100"
             />
           </label>
-          <div className="mt-3 flex gap-2 overflow-x-auto pb-1 sm:justify-center">
+          <div className="mt-2.5 flex gap-1.5 overflow-x-auto pb-0.5">
             {[
               { id: "all", slug: "all", label: "Tout", sortOrder: -1 },
               ...categories,
@@ -226,7 +251,7 @@ function MenuContent() {
               <button
                 key={c.id}
                 onClick={() => setCategory(c.slug)}
-                className={`shrink-0 rounded-full border px-2.5 py-1 text-[9px] font-semibold transition-colors sm:px-3.5 sm:py-1.5 sm:text-[10px] ${
+                className={`shrink-0 rounded-full border px-2.5 py-1 text-[9px] font-semibold transition-colors sm:text-[10px] ${
                   category === c.slug
                     ? "border-brand-500 bg-brand-500 text-ink shadow-card"
                     : "border-line bg-white text-ink-soft shadow-card hover:border-brand-300 hover:text-brand-600"
@@ -239,66 +264,69 @@ function MenuContent() {
         </div>
 
         {loading ? (
-          <div className="flex justify-center py-24">
+          <div className="flex justify-center py-20">
             <LoaderCircle size={28} className="animate-spin text-brand-500" />
           </div>
-        ) : items.length === 0 ? (
-          <div className="mx-auto mt-8 max-w-md rounded-2xl border border-dashed border-line bg-white p-10 text-center shadow-card">
-            <p className="font-display text-xl font-bold">
-              Rien dans cette catégorie
-            </p>
-            <p className="mt-2 text-sm text-ink-soft">
-              Les plats disponibles apparaîtront ici dès leur mise en ligne.
+        ) : sections.length === 0 ? (
+          <div className="mx-auto mt-6 max-w-md rounded-2xl border border-dashed border-line bg-white p-8 text-center shadow-card">
+            <p className="font-display text-lg font-bold">Aucun plat</p>
+            <p className="mt-1 text-sm text-ink-soft">
+              Essayez une autre catégorie ou recherche.
             </p>
           </div>
         ) : (
-          <div className="mt-6 grid grid-cols-2 gap-2.5 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4">
-            {items.map((m) => (
-              <div
-                key={m.id}
-                className="group flex flex-col overflow-hidden rounded-2xl border border-line bg-white shadow-card transition hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-panel"
-              >
-                <div className="relative">
-                  <FoodImage
-                    src={m.imageUrl}
-                    alt={m.name}
-                    className="h-24 w-full object-cover sm:h-32"
-                  />
-                  {m.signature && (
-                    <span className="absolute right-1.5 top-1.5 rounded-full bg-white/95 px-2 py-0.5 text-[9px] font-bold text-brand-600 shadow-card">
-                      Signature
-                    </span>
-                  )}
+          <div className="space-y-6">
+            {sections.map((section) => (
+              <section key={section.slug}>
+                <h2 className="mb-2.5 font-display text-base font-bold tracking-tight text-ink sm:text-lg">
+                  {section.label}
+                </h2>
+                <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-4 sm:gap-2 lg:grid-cols-5 xl:grid-cols-6">
+                  {section.items.map((m) => (
+                    <div
+                      key={m.id}
+                      className="group flex flex-col overflow-hidden rounded-xl border border-line bg-white shadow-card transition hover:border-brand-300"
+                    >
+                      <div className="relative">
+                        <FoodImage
+                          src={m.imageUrl}
+                          alt={m.name}
+                          className="aspect-square h-auto w-full object-cover"
+                        />
+                        {m.signature && (
+                          <span className="absolute right-1 top-1 rounded-full bg-white/95 px-1.5 py-0.5 text-[8px] font-bold text-brand-600 shadow-card">
+                            ★
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-1 flex-col p-1.5 sm:p-2">
+                        <p className="line-clamp-2 text-[10px] font-semibold leading-tight text-ink sm:text-[11px]">
+                          {m.name}
+                        </p>
+                        <div className="mt-1 flex items-center justify-between gap-0.5">
+                          <span className="text-[9px] font-bold tabular-nums text-brand-600 sm:text-[10px]">
+                            {formatFCFA(m.price)}
+                          </span>
+                          {!browseOnly && (
+                            <button
+                              onClick={() => add(m)}
+                              aria-label={`Ajouter ${m.name}`}
+                              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-brand-500 text-ink transition-colors hover:bg-brand-600 sm:h-6 sm:w-6"
+                            >
+                              <Plus size={11} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <div className="flex flex-1 flex-col p-2.5 sm:p-3">
-                  <p className="line-clamp-2 font-script text-lg leading-5 sm:text-xl sm:leading-6">
-                    {m.name}
-                  </p>
-                  <p className="mt-0.5 line-clamp-2 flex-1 text-[10px] text-ink-soft sm:text-xs">
-                    {m.description}
-                  </p>
-                  <div className="mt-2 flex items-center justify-between gap-1">
-                    <span className="text-xs font-bold text-brand-600 tabular-nums sm:text-sm">
-                      {formatFCFA(m.price)}
-                    </span>
-                    {!browseOnly && (
-                      <button
-                        onClick={() => add(m)}
-                        aria-label={`Ajouter ${m.name}`}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-500 text-ink transition-colors hover:bg-brand-600 sm:h-8 sm:w-8"
-                      >
-                        <Plus size={14} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
+              </section>
             ))}
           </div>
         )}
       </div>
 
-      {/* Bouton panier flottant */}
       {count > 0 && !cartOpen && (
         <button
           onClick={() => setCartOpen(true)}
@@ -309,7 +337,6 @@ function MenuContent() {
         </button>
       )}
 
-      {/* Drawer panier */}
       {cartOpen && (
         <div className="fixed inset-0 z-50">
           <div
@@ -384,6 +411,19 @@ function MenuContent() {
                   {error}
                 </p>
               )}
+              <label className="mb-3 block">
+                <span className="mb-1.5 block text-[11px] font-semibold text-ink-soft">
+                  Précisions (optionnel)
+                </span>
+                <textarea
+                  value={orderNote}
+                  onChange={(e) => setOrderNote(e.target.value)}
+                  rows={2}
+                  maxLength={280}
+                  placeholder="Moins de sel, beaucoup de piment…"
+                  className="w-full resize-none rounded-xl border border-line bg-surface-muted px-3 py-2 text-xs outline-none transition focus:border-brand-400 focus:bg-white"
+                />
+              </label>
               <div className="mb-3 flex items-center justify-between">
                 <span className="text-xs text-ink-soft sm:text-sm">
                   Sur place
